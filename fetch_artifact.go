@@ -15,16 +15,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
+	"time"
+
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 var (
@@ -33,6 +39,9 @@ var (
 	branch   = flag.String("branch", "", "the branch to fetch from, used when '-build_id' is not provided,\nit would fetch the latest successful build")
 	artifact = flag.String("artifact", "", "the artifact to download")
 	output   = flag.String("output", "", "the file name to save as")
+	clientID = flag.String("client_id", "", "[Optional] OAuth 2.0 Client ID. Must be used with '-secret'")
+	secret   = flag.String("secret", "", "[Optional] OAuth 2.0 Client Secret. Must be used with '-client_id'")
+	port     = flag.Int("port", 10502, "[Optional] the port number where the oauth callback server would listen on")
 )
 
 var writeToStdout = false
@@ -43,6 +52,29 @@ type BuildResponse struct {
 
 type Build struct {
 	BuildId string `json:"buildId"`
+}
+
+type Auth struct {
+	clientID string
+	secret   string
+}
+
+func newAuth(clientID, secret string) *Auth {
+	return &Auth{clientID: clientID, secret: secret}
+}
+
+func newClient(ctx context.Context, auth *Auth) *http.Client {
+	if auth == nil {
+		return &http.Client{}
+	}
+
+	config := &oauth2.Config{
+		ClientID:     auth.clientID,
+		ClientSecret: auth.secret,
+		Endpoint:     google.Endpoint,
+		Scopes:       []string{"https://www.googleapis.com/auth/androidbuild.internal"},
+	}
+	return newOAuthClient(ctx, config)
 }
 
 type FetchConfig struct {
@@ -70,7 +102,6 @@ func newFetchConfig(client *http.Client, target string, buildID string, branch s
 		return nil, err
 	}
 	return config, nil
-
 }
 
 func (c *FetchConfig) validate() error {
@@ -124,16 +155,75 @@ func main() {
 	flag.Parse()
 	args := flag.Args()
 
-	client := &http.Client{}
+	var auth *Auth
+	if len(*clientID) != 0 && len(*secret) != 0 {
+		auth = newAuth(*clientID, *secret)
+	} else if len(*clientID) != 0 || len(*secret) != 0 {
+		errPrint(fmt.Sprintf("missing client_id or client_secret."))
+	}
+
+	ctx := context.Background()
+	client := newClient(ctx, auth)
 
 	config, err := newFetchConfig(client, *target, *buildID, *branch, *output, *artifact, args)
 	if err != nil {
 		errPrint(fmt.Sprintf("Config validation error: %s", err))
 	}
 
-	err = fetchArtifact(config)
+	fetchArtifact(config)
+}
+
+func newOAuthClient(ctx context.Context, config *oauth2.Config) *http.Client {
+	token := tokenFromWeb(ctx, config)
+	return config.Client(ctx, token)
+}
+
+func tokenFromWeb(ctx context.Context, config *oauth2.Config) *oauth2.Token {
+	ch := make(chan string)
+	randState := fmt.Sprintf("st%d", time.Now().UnixNano())
+	ts := createServer(ch, randState)
+	go ts.ListenAndServe()
+
+	defer ts.Close()
+	config.RedirectURL = "http://localhost" + ts.Addr
+	authURL := config.AuthCodeURL(randState)
+	log.Printf("Authorize this app at: %s", authURL)
+	code := <-ch
+
+	token, err := config.Exchange(ctx, code)
 	if err != nil {
-		errPrint(fmt.Sprintf("Fetch artifact error: %s", err))
+		errPrint(fmt.Sprintf("Token exchange error: %v", err))
+
+	}
+	return token
+}
+
+func createServer(ch chan string, state string) *http.Server {
+	return &http.Server{
+		Addr:    fmt.Sprintf(":%d", *port),
+		Handler: http.HandlerFunc(handler(ch, state)),
+	}
+}
+
+func handler(ch chan string, randState string) func(http.ResponseWriter, *http.Request) {
+	return func(rw http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/favicon.ico" {
+			http.Error(rw, "error: visiting /favicon.ico", 404)
+			return
+		}
+		if req.FormValue("state") != randState {
+			log.Printf("state: %s doesn't match. (expected: %s)", req.FormValue("state"), randState)
+			http.Error(rw, "invalid state", 500)
+			return
+		}
+		if code := req.FormValue("code"); code != "" {
+			fmt.Fprintf(rw, "<h1>Success</h1>Authorized.")
+			rw.(http.Flusher).Flush()
+			ch <- code
+			return
+		}
+		ch <- ""
+		http.Error(rw, "invalid code", 500)
 	}
 }
 

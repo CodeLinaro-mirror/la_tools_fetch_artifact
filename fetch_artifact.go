@@ -45,63 +45,93 @@ type Build struct {
 	BuildId string `json:"buildId"`
 }
 
+type FetchConfig struct {
+	client   *http.Client
+	target   string
+	buildID  string
+	branch   string
+	output   string
+	artifact string
+	args     []string
+}
+
+func newFetchConfig(client *http.Client, target string, buildID string, branch string, output string, artifact string, args []string) (*FetchConfig, error) {
+	config := &FetchConfig{
+		client:   client,
+		target:   target,
+		buildID:  buildID,
+		branch:   branch,
+		output:   output,
+		artifact: artifact,
+		args:     args,
+	}
+	err := config.validate()
+	if err != nil {
+		return nil, err
+	}
+	return config, nil
+
+}
+
+func (c *FetchConfig) validate() error {
+	// We only support passing 1 argument `-` so if we have more than
+	// one argument this is an error state,
+	if len(c.args) > 1 {
+		return errors.New("too many arguments passed to fetch_artifact")
+	}
+
+	if len(c.args) > 0 {
+		writeToStdout = c.args[len(c.args)-1] == "-"
+		if !writeToStdout {
+			return fmt.Errorf(
+				"only supported final argument to fetch_artifact is `-` but got `%s`", c.args[len(c.args)-1])
+		}
+
+		if len(c.output) > 0 && writeToStdout {
+			return errors.New("both '-output' and '-' flags can not be used together")
+		}
+	}
+
+	// check user provided flags
+	if len(c.target) == 0 {
+		return errors.New("missing target")
+	}
+	if len(c.artifact) == 0 {
+		return errors.New("missing artifact")
+	}
+	if len(c.buildID) == 0 && len(c.branch) == 0 {
+		return errors.New("missing build_id or branch")
+	}
+	if len(c.buildID) != 0 && len(c.branch) != 0 {
+		return errors.New("too many arguments, you should only give build_id or branch")
+	}
+	if len(c.buildID) == 0 {
+		bid, err := getLatestGoodBuild(c)
+		if err != nil {
+			return err
+		}
+		c.buildID = bid
+	}
+	return nil
+}
+
 func errPrint(msg string) {
 	fmt.Fprintln(os.Stderr, msg)
 	os.Exit(1)
 }
 
-func checkFlags() error {
-	if len(*target) == 0 {
-		return errors.New("missing target")
-	}
-	if len(*artifact) == 0 {
-		return errors.New("missing artifact")
-	}
-	if len(*buildID) == 0 && len(*branch) == 0 {
-		return errors.New("missing build_id or branch")
-	}
-	if len(*buildID) != 0 && len(*branch) != 0 {
-		return errors.New("too many arguments. give only build ID or branch")
-	}
-	return nil
-}
-
 func main() {
 	flag.Parse()
 	args := flag.Args()
-	// We only support passing 1 argument `-` so if we have more than
-	// one argument this is an error state,
-	if len(args) > 1 {
-		errPrint("Error: Too many arguments passed to fetch_artifact.")
-	}
-
-	if len(args) > 0 {
-		writeToStdout = args[len(args)-1] == "-"
-		if !writeToStdout {
-			errPrint(fmt.Sprintf(
-				"Error: Only supported final argument to fetch_artifact is `-` but got `%s`.", args[len(args)-1]))
-		}
-
-		if len(*output) > 0 && writeToStdout {
-			errPrint("Error: Both '-output' and '-' flags can not be used together.")
-		}
-	}
-
-	if err := checkFlags(); err != nil {
-		flag.Usage()
-		errPrint(err.Error())
-	}
 
 	client := &http.Client{}
 
-	if len(*buildID) == 0 {
-		latestGoodBuildID, err := getLatestGoodBuild(client, *branch, *target)
-		if err != nil {
-			errPrint(fmt.Sprintf("Error fetching latest good buildID %s, err", err))
-		}
-		flag.Set("build_id", latestGoodBuildID)
+	config, err := newFetchConfig(client, *target, *buildID, *branch, *output, *artifact, args)
+	if err != nil {
+		errPrint(fmt.Sprintf("Config validation error: %s", err))
 	}
-	err := fetchArtifact(client, *target, *buildID, *artifact, *output)
+
+	err = fetchArtifact(config)
 	if err != nil {
 		errPrint(fmt.Sprintf("Fetch artifact error: %s", err))
 	}
@@ -121,9 +151,9 @@ func sendRequest(client *http.Client, url string) (*http.Response, error) {
 	return res, nil
 }
 
-func fetchArtifact(client *http.Client, target string, buildID string, artifact string, output string) error {
-	url := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds/%s/%s/attempts/latest/artifacts/%s/url", url.QueryEscape(buildID), url.QueryEscape(target), url.QueryEscape(artifact))
-	res, err := sendRequest(client, url)
+func fetchArtifact(c *FetchConfig) error {
+	url := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds/%s/%s/attempts/latest/artifacts/%s/url", url.QueryEscape(c.buildID), url.QueryEscape(c.target), url.QueryEscape(c.artifact))
+	res, err := sendRequest(c.client, url)
 	if err != nil {
 		return fmt.Errorf("error fetching artifact %w", err)
 	}
@@ -139,9 +169,9 @@ func fetchArtifact(client *http.Client, target string, buildID string, artifact 
 		return nil
 	}
 
-	fileName := artifact
-	if len(output) > 0 {
-		fileName = output
+	fileName := c.artifact
+	if len(c.output) > 0 {
+		fileName = c.output
 	}
 
 	f, err := os.Create(path.Base(fileName))
@@ -154,9 +184,9 @@ func fetchArtifact(client *http.Client, target string, buildID string, artifact 
 	return nil
 }
 
-func getLatestGoodBuild(client *http.Client, branch string, target string) (string, error) {
-	url := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds?branches=%s&buildAttemptStatus=complete&buildType=submitted&maxResults=1&successful=true&target=%s", url.QueryEscape(branch), url.QueryEscape(target))
-	res, err := sendRequest(client, url)
+func getLatestGoodBuild(c *FetchConfig) (string, error) {
+	url := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds?branches=%s&buildAttemptStatus=complete&buildType=submitted&maxResults=1&successful=true&target=%s", url.QueryEscape(c.branch), url.QueryEscape(c.target))
+	res, err := sendRequest(c.client, url)
 	if err != nil {
 		return "", fmt.Errorf("send request error: %w", err)
 	}

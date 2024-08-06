@@ -14,6 +14,7 @@ Fetch artifact is a tool for downloading artifacts from Android's continuous int
 * `client_id`: *Optional* - If authorization is required to download the artifact, please set this parameter as your OAuth2.0 Client ID.
 * `secret`: *Optional* - If authorization is required to download the artifact, please set this parameter as your OAuth2.0 Client secret.
 * `port`: *Optional* - If you would like to specify the OAuth callback port to listen on. Default: 10502
+* `project_id`: *Optional* - The project id being used to access the fetch APIs.
 * `-`: *Optional* - If you would like the contents of the file to be written to stdout  (must be the last arg)
 
 ## Example usage
@@ -38,6 +39,12 @@ In this case, you might need to create an OAuth 2.0 Client ID for a web applicat
 
 ```
 fetch_artifact -target=<restricted_target> -build_id=<id> -artifact=COPIED -client_id=<OAuth_client_id> -secret=<OAuth_client_secret>
+```
+
+If you are accessing the fetch APIs from a different project than your OAuth client, you will need to specify the `-project_id` flag:
+
+```
+fetch_artifact -target=<restricted_target> -build_id=<id> -artifact=COPIED -client_id=<OAuth_client_id> -secret=<OAuth_client_secret> -project_id=<project_id>
 ```
 
 ## Development

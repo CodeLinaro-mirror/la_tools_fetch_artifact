@@ -47,6 +47,12 @@ If you are accessing the fetch APIs from a different project than your OAuth cli
 fetch_artifact -target=<restricted_target> -build_id=<id> -artifact=COPIED -client_id=<OAuth_client_id> -secret=<OAuth_client_secret> -project_id=<project_id>
 ```
 
+If you would like to cache the exchanged token and use it for the subsequent fetchs, please sepcify the `-token_cache` flag:
+
+```
+fetch_artifact -target=<restricted_target> -build_id=<id> -artifact=COPIED -client_id=<OAuth_client_id> -secret=<OAuth_client_secret> -project_id=<project_id> -token_cache=<path_of_a_local_cache_file>
+```
+
 ## Development
 
 ### Building

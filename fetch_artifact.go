@@ -34,14 +34,15 @@ import (
 )
 
 var (
-	target   = flag.String("target", "", "the target to fetch from")
-	buildID  = flag.String("build_id", "", "the build id to fetch from, can use '-branch' to get the latest passed build ID")
-	branch   = flag.String("branch", "", "the branch to fetch from, used when '-build_id' is not provided,\nit would fetch the latest successful build")
-	artifact = flag.String("artifact", "", "the artifact to download")
-	output   = flag.String("output", "", "the file name to save as")
-	clientID = flag.String("client_id", "", "[Optional] OAuth 2.0 Client ID. Must be used with '-secret'")
-	secret   = flag.String("secret", "", "[Optional] OAuth 2.0 Client Secret. Must be used with '-client_id'")
-	port     = flag.Int("port", 10502, "[Optional] the port number where the oauth callback server would listen on")
+	target    = flag.String("target", "", "the target to fetch from")
+	buildID   = flag.String("build_id", "", "the build id to fetch from, can use '-branch' to get the latest passed build ID")
+	branch    = flag.String("branch", "", "the branch to fetch from, used when '-build_id' is not provided,\nit would fetch the latest successful build")
+	artifact  = flag.String("artifact", "", "the artifact to download")
+	output    = flag.String("output", "", "the file name to save as")
+	clientID  = flag.String("client_id", "", "[Optional] OAuth 2.0 Client ID. Must be used with '-secret'")
+	secret    = flag.String("secret", "", "[Optional] OAuth 2.0 Client Secret. Must be used with '-client_id'")
+	port      = flag.Int("port", 10502, "[Optional] the port number where the oauth callback server would listen on")
+	projectID = flag.String("project_id", "", "[Optional] the project id being used to access the fetch APIs.")
 )
 
 var writeToStdout = false
@@ -78,24 +79,26 @@ func newClient(ctx context.Context, auth *Auth) *http.Client {
 }
 
 type FetchConfig struct {
-	client   *http.Client
-	target   string
-	buildID  string
-	branch   string
-	output   string
-	artifact string
-	args     []string
+	client    *http.Client
+	target    string
+	buildID   string
+	branch    string
+	output    string
+	artifact  string
+	projectID string
+	args      []string
 }
 
-func newFetchConfig(client *http.Client, target string, buildID string, branch string, output string, artifact string, args []string) (*FetchConfig, error) {
+func newFetchConfig(client *http.Client, target string, buildID string, branch string, output string, artifact string, projectID string, args []string) (*FetchConfig, error) {
 	config := &FetchConfig{
-		client:   client,
-		target:   target,
-		buildID:  buildID,
-		branch:   branch,
-		output:   output,
-		artifact: artifact,
-		args:     args,
+		client:    client,
+		target:    target,
+		buildID:   buildID,
+		branch:    branch,
+		output:    output,
+		artifact:  artifact,
+		projectID: projectID,
+		args:      args,
 	}
 	err := config.validate()
 	if err != nil {
@@ -165,7 +168,7 @@ func main() {
 	ctx := context.Background()
 	client := newClient(ctx, auth)
 
-	config, err := newFetchConfig(client, *target, *buildID, *branch, *output, *artifact, args)
+	config, err := newFetchConfig(client, *target, *buildID, *branch, *output, *artifact, *projectID, args)
 	if err != nil {
 		errPrint(fmt.Sprintf("Config validation error: %s", err))
 	}
@@ -242,8 +245,11 @@ func sendRequest(client *http.Client, url string) (*http.Response, error) {
 }
 
 func fetchArtifact(c *FetchConfig) error {
-	url := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds/%s/%s/attempts/latest/artifacts/%s/url", url.QueryEscape(c.buildID), url.QueryEscape(c.target), url.QueryEscape(c.artifact))
-	res, err := sendRequest(c.client, url)
+	apiURL := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds/%s/%s/attempts/latest/artifacts/%s/url", url.QueryEscape(c.buildID), url.QueryEscape(c.target), url.QueryEscape(c.artifact))
+	if len(c.projectID) != 0 {
+		apiURL += fmt.Sprintf("?$userProject=%s", url.QueryEscape(c.projectID))
+	}
+	res, err := sendRequest(c.client, apiURL)
 	if err != nil {
 		return fmt.Errorf("error fetching artifact %w", err)
 	}
@@ -275,8 +281,11 @@ func fetchArtifact(c *FetchConfig) error {
 }
 
 func getLatestGoodBuild(c *FetchConfig) (string, error) {
-	url := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds?branches=%s&buildAttemptStatus=complete&buildType=submitted&maxResults=1&successful=true&target=%s", url.QueryEscape(c.branch), url.QueryEscape(c.target))
-	res, err := sendRequest(c.client, url)
+	apiURL := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds?branches=%s&buildAttemptStatus=complete&buildType=submitted&maxResults=1&successful=true&target=%s", url.QueryEscape(c.branch), url.QueryEscape(c.target))
+	if len(c.projectID) != 0 {
+		apiURL += fmt.Sprintf("?$userProject=%s", url.QueryEscape(c.projectID))
+	}
+	res, err := sendRequest(c.client, apiURL)
 	if err != nil {
 		return "", fmt.Errorf("send request error: %w", err)
 	}

@@ -283,7 +283,7 @@ func fetchArtifact(c *FetchConfig) error {
 func getLatestGoodBuild(c *FetchConfig) (string, error) {
 	apiURL := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds?branches=%s&buildAttemptStatus=complete&buildType=submitted&maxResults=1&successful=true&target=%s", url.QueryEscape(c.branch), url.QueryEscape(c.target))
 	if len(c.projectID) != 0 {
-		apiURL += fmt.Sprintf("?$userProject=%s", url.QueryEscape(c.projectID))
+		apiURL += fmt.Sprintf("&$userProject=%s", url.QueryEscape(c.projectID))
 	}
 	res, err := sendRequest(c.client, apiURL)
 	if err != nil {

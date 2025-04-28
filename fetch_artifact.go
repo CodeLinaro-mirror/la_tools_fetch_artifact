@@ -185,7 +185,12 @@ func tokenFromWeb(ctx context.Context, config *oauth2.Config) *oauth2.Token {
 	ch := make(chan string)
 	randState := fmt.Sprintf("st%d", time.Now().UnixNano())
 	ts := createServer(ch, randState)
-	go ts.ListenAndServe()
+	go func() {
+		err := ts.ListenAndServe()
+		if err != http.ErrServerClosed {
+			errPrint(fmt.Sprintf("Listen and serve error: %v", err))
+		}
+	}()
 
 	defer ts.Close()
 	config.RedirectURL = "http://localhost" + ts.Addr

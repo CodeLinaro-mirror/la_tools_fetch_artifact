@@ -235,12 +235,15 @@ func handler(ch chan string, randState string) func(http.ResponseWriter, *http.R
 	}
 }
 
-func sendRequest(client *http.Client, url string) (*http.Response, error) {
+func sendRequest(client *http.Client, url string, projectID string) (*http.Response, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	if len(projectID) != 0 {
+		req.Header.Set("X-Goog-User-Project", projectID)
+	}
 
 	res, err := client.Do(req)
 	if err != nil {
@@ -250,11 +253,8 @@ func sendRequest(client *http.Client, url string) (*http.Response, error) {
 }
 
 func fetchArtifact(c *FetchConfig) error {
-	apiURL := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds/%s/%s/attempts/latest/artifacts/%s/url", url.QueryEscape(c.buildID), url.QueryEscape(c.target), url.QueryEscape(c.artifact))
-	if len(c.projectID) != 0 {
-		apiURL += fmt.Sprintf("?$userProject=%s", url.QueryEscape(c.projectID))
-	}
-	res, err := sendRequest(c.client, apiURL)
+	apiURL := fmt.Sprintf("https://androidbuild-pa.googleapis.com/v4/builds/%s/%s/attempts/latest/artifacts/%s/url", url.QueryEscape(c.buildID), url.QueryEscape(c.target), url.QueryEscape(c.artifact))
+	res, err := sendRequest(c.client, apiURL, c.projectID)
 	if err != nil {
 		return fmt.Errorf("error fetching artifact %w", err)
 	}
@@ -286,11 +286,8 @@ func fetchArtifact(c *FetchConfig) error {
 }
 
 func getLatestGoodBuild(c *FetchConfig) (string, error) {
-	apiURL := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds?branches=%s&buildAttemptStatus=complete&buildType=submitted&maxResults=1&successful=true&target=%s", url.QueryEscape(c.branch), url.QueryEscape(c.target))
-	if len(c.projectID) != 0 {
-		apiURL += fmt.Sprintf("&$userProject=%s", url.QueryEscape(c.projectID))
-	}
-	res, err := sendRequest(c.client, apiURL)
+	apiURL := fmt.Sprintf("https://androidbuild-pa.googleapis.com/v4/builds?branches=%s&buildAttemptStatus=COMPLETE&buildType=SUBMITTED&pageSize=1&successful=true&targets=%s", url.QueryEscape(c.branch), url.QueryEscape(c.target))
+	res, err := sendRequest(c.client, apiURL, c.projectID)
 	if err != nil {
 		return "", fmt.Errorf("send request error: %w", err)
 	}

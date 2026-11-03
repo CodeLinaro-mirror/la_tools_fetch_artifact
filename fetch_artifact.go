@@ -189,18 +189,31 @@ func newOAuthClient(ctx context.Context, config *oauth2.Config, tokenCacheFile s
 	if tokenCacheFile == "" {
 		token := tokenFromWeb(ctx, config)
 		return config.Client(ctx, token)
-	} else {
-		log.Printf("Loading cached token from %s", tokenCacheFile)
-		token, err := tokenFromFile(tokenCacheFile)
-		if err != nil {
-			token = tokenFromWeb(ctx, config)
-			err = saveToken(tokenCacheFile, token)
-			if err != nil {
-				log.Println("Warning: unable to save token")
-			}
-		}
-		return config.Client(ctx, token)
 	}
+
+	log.Printf("Loading cached token from %s", tokenCacheFile)
+	cached, err := tokenFromFile(tokenCacheFile)
+	if err == nil && (cached.Valid() || cached.RefreshToken != "") {
+		// Use the refresh token (if needed) to get a valid access token
+		// without asking the user to sign in again.
+		token, err := config.TokenSource(ctx, cached).Token()
+		if err == nil {
+			if token.AccessToken != cached.AccessToken {
+				if err := saveToken(tokenCacheFile, token); err != nil {
+					log.Println("Warning: unable to save refreshed token")
+				}
+			}
+			return config.Client(ctx, token)
+		}
+		log.Printf("Unable to refresh cached token: %v", err)
+	}
+
+	// Ask for a refresh token so the cached token can be renewed later.
+	token := tokenFromWeb(ctx, config, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+	if err := saveToken(tokenCacheFile, token); err != nil {
+		log.Println("Warning: unable to save token")
+	}
+	return config.Client(ctx, token)
 }
 
 func saveToken(file string, token *oauth2.Token) error {
@@ -227,7 +240,7 @@ func tokenFromFile(file string) (*oauth2.Token, error) {
 	return token, err
 }
 
-func tokenFromWeb(ctx context.Context, config *oauth2.Config) *oauth2.Token {
+func tokenFromWeb(ctx context.Context, config *oauth2.Config, opts ...oauth2.AuthCodeOption) *oauth2.Token {
 	ch := make(chan string)
 	randState := fmt.Sprintf("st%d", time.Now().UnixNano())
 	ts := createServer(ch, randState)
@@ -240,7 +253,7 @@ func tokenFromWeb(ctx context.Context, config *oauth2.Config) *oauth2.Token {
 
 	defer ts.Close()
 	config.RedirectURL = "http://localhost" + ts.Addr
-	authURL := config.AuthCodeURL(randState)
+	authURL := config.AuthCodeURL(randState, opts...)
 	log.Printf("Authorize this app at: %s", authURL)
 	code := <-ch
 

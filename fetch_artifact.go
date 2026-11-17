@@ -34,15 +34,16 @@ import (
 )
 
 var (
-	target    = flag.String("target", "", "the target to fetch from")
-	buildID   = flag.String("build_id", "", "the build id to fetch from, can use '-branch' to get the latest passed build ID")
-	branch    = flag.String("branch", "", "the branch to fetch from, used when '-build_id' is not provided,\nit would fetch the latest successful build")
-	artifact  = flag.String("artifact", "", "the artifact to download")
-	output    = flag.String("output", "", "the file name to save as")
-	clientID  = flag.String("client_id", "", "[Optional] OAuth 2.0 Client ID. Must be used with '-secret'")
-	secret    = flag.String("secret", "", "[Optional] OAuth 2.0 Client Secret. Must be used with '-client_id'")
-	port      = flag.Int("port", 10502, "[Optional] the port number where the oauth callback server would listen on")
-	projectID = flag.String("project_id", "", "[Optional] the project id being used to access the fetch APIs.")
+	target     = flag.String("target", "", "the target to fetch from")
+	buildID    = flag.String("build_id", "", "the build id to fetch from, can use '-branch' to get the latest passed build ID")
+	branch     = flag.String("branch", "", "the branch to fetch from, used when '-build_id' is not provided,\nit would fetch the latest successful build")
+	artifact   = flag.String("artifact", "", "the artifact to download")
+	output     = flag.String("output", "", "the file name to save as")
+	clientID   = flag.String("client_id", "", "[Optional] OAuth 2.0 Client ID. Must be used with '-secret'")
+	secret     = flag.String("secret", "", "[Optional] OAuth 2.0 Client Secret. Must be used with '-client_id'")
+	port       = flag.Int("port", 10502, "[Optional] the port number where the oauth callback server would listen on")
+	projectID  = flag.String("project_id", "", "[Optional] the project id being used to access the fetch APIs.")
+	tokenCache = flag.String("token_cache", "", "[Optional] the file path to cache an access token.")
 )
 
 var writeToStdout = false
@@ -56,12 +57,17 @@ type Build struct {
 }
 
 type Auth struct {
-	clientID string
-	secret   string
+	clientID       string
+	secret         string
+	tokenCacheFile string
 }
 
-func newAuth(clientID, secret string) *Auth {
-	return &Auth{clientID: clientID, secret: secret}
+func newAuth(clientID, secret, tokenCacheFile string) *Auth {
+	return &Auth{
+		clientID:       clientID,
+		secret:         secret,
+		tokenCacheFile: tokenCacheFile,
+	}
 }
 
 func newClient(ctx context.Context, auth *Auth) *http.Client {
@@ -75,7 +81,7 @@ func newClient(ctx context.Context, auth *Auth) *http.Client {
 		Endpoint:     google.Endpoint,
 		Scopes:       []string{"https://www.googleapis.com/auth/androidbuild.internal"},
 	}
-	return newOAuthClient(ctx, config)
+	return newOAuthClient(ctx, config, auth.tokenCacheFile)
 }
 
 type FetchConfig struct {
@@ -160,7 +166,7 @@ func main() {
 
 	var auth *Auth
 	if len(*clientID) != 0 && len(*secret) != 0 {
-		auth = newAuth(*clientID, *secret)
+		auth = newAuth(*clientID, *secret, *tokenCache)
 	} else if len(*clientID) != 0 || len(*secret) != 0 {
 		errPrint(fmt.Sprintf("missing client_id or client_secret."))
 	}
@@ -173,15 +179,68 @@ func main() {
 		errPrint(fmt.Sprintf("Config validation error: %s", err))
 	}
 
-	fetchArtifact(config)
+	err = fetchArtifact(config)
+	if err != nil {
+		errPrint(fmt.Sprintf("Fetch error: %s", err))
+	}
 }
 
-func newOAuthClient(ctx context.Context, config *oauth2.Config) *http.Client {
-	token := tokenFromWeb(ctx, config)
+func newOAuthClient(ctx context.Context, config *oauth2.Config, tokenCacheFile string) *http.Client {
+	if tokenCacheFile == "" {
+		token := tokenFromWeb(ctx, config)
+		return config.Client(ctx, token)
+	}
+
+	log.Printf("Loading cached token from %s", tokenCacheFile)
+	cached, err := tokenFromFile(tokenCacheFile)
+	if err == nil && (cached.Valid() || cached.RefreshToken != "") {
+		// Use the refresh token (if needed) to get a valid access token
+		// without asking the user to sign in again.
+		token, err := config.TokenSource(ctx, cached).Token()
+		if err == nil {
+			if token.AccessToken != cached.AccessToken {
+				if err := saveToken(tokenCacheFile, token); err != nil {
+					log.Println("Warning: unable to save refreshed token")
+				}
+			}
+			return config.Client(ctx, token)
+		}
+		log.Printf("Unable to refresh cached token: %v", err)
+	}
+
+	// Ask for a refresh token so the cached token can be renewed later.
+	token := tokenFromWeb(ctx, config, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+	if err := saveToken(tokenCacheFile, token); err != nil {
+		log.Println("Warning: unable to save token")
+	}
 	return config.Client(ctx, token)
 }
 
-func tokenFromWeb(ctx context.Context, config *oauth2.Config) *oauth2.Token {
+func saveToken(file string, token *oauth2.Token) error {
+	log.Printf("Saving token at: %s", file)
+	f, err := os.OpenFile(file, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	err = json.NewEncoder(f).Encode(token)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+func tokenFromFile(file string) (*oauth2.Token, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	token := &oauth2.Token{}
+	err = json.NewDecoder(f).Decode(token)
+	defer f.Close()
+	return token, err
+}
+
+func tokenFromWeb(ctx context.Context, config *oauth2.Config, opts ...oauth2.AuthCodeOption) *oauth2.Token {
 	ch := make(chan string)
 	randState := fmt.Sprintf("st%d", time.Now().UnixNano())
 	ts := createServer(ch, randState)
@@ -194,7 +253,7 @@ func tokenFromWeb(ctx context.Context, config *oauth2.Config) *oauth2.Token {
 
 	defer ts.Close()
 	config.RedirectURL = "http://localhost" + ts.Addr
-	authURL := config.AuthCodeURL(randState)
+	authURL := config.AuthCodeURL(randState, opts...)
 	log.Printf("Authorize this app at: %s", authURL)
 	code := <-ch
 
@@ -235,12 +294,15 @@ func handler(ch chan string, randState string) func(http.ResponseWriter, *http.R
 	}
 }
 
-func sendRequest(client *http.Client, url string) (*http.Response, error) {
+func sendRequest(client *http.Client, url string, projectID string) (*http.Response, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	if len(projectID) != 0 {
+		req.Header.Set("X-Goog-User-Project", projectID)
+	}
 
 	res, err := client.Do(req)
 	if err != nil {
@@ -250,11 +312,8 @@ func sendRequest(client *http.Client, url string) (*http.Response, error) {
 }
 
 func fetchArtifact(c *FetchConfig) error {
-	apiURL := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds/%s/%s/attempts/latest/artifacts/%s/url", url.QueryEscape(c.buildID), url.QueryEscape(c.target), url.QueryEscape(c.artifact))
-	if len(c.projectID) != 0 {
-		apiURL += fmt.Sprintf("?$userProject=%s", url.QueryEscape(c.projectID))
-	}
-	res, err := sendRequest(c.client, apiURL)
+	apiURL := fmt.Sprintf("https://androidbuild-pa.googleapis.com/v4/builds/%s/%s/attempts/latest/artifacts/%s/url", url.QueryEscape(c.buildID), url.QueryEscape(c.target), url.QueryEscape(c.artifact))
+	res, err := sendRequest(c.client, apiURL, c.projectID)
 	if err != nil {
 		return fmt.Errorf("error fetching artifact %w", err)
 	}
@@ -286,11 +345,8 @@ func fetchArtifact(c *FetchConfig) error {
 }
 
 func getLatestGoodBuild(c *FetchConfig) (string, error) {
-	apiURL := fmt.Sprintf("https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds?branches=%s&buildAttemptStatus=complete&buildType=submitted&maxResults=1&successful=true&target=%s", url.QueryEscape(c.branch), url.QueryEscape(c.target))
-	if len(c.projectID) != 0 {
-		apiURL += fmt.Sprintf("&$userProject=%s", url.QueryEscape(c.projectID))
-	}
-	res, err := sendRequest(c.client, apiURL)
+	apiURL := fmt.Sprintf("https://androidbuild-pa.googleapis.com/v4/builds?branches=%s&buildAttemptStatus=COMPLETE&buildType=SUBMITTED&pageSize=1&successful=true&targets=%s", url.QueryEscape(c.branch), url.QueryEscape(c.target))
+	res, err := sendRequest(c.client, apiURL, c.projectID)
 	if err != nil {
 		return "", fmt.Errorf("send request error: %w", err)
 	}
